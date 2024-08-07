@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -34,11 +33,11 @@ func main() {
 	defer f.Close()
 
 	msg := append([]byte("Dolar: "), bid...)
-	size, err := f.Write(msg)
+	_, err = f.Write(msg)
 	if err != nil {
 		return
 	}
 
-	fmt.Println(size)
+	//fmt.Println(size)
 
 }

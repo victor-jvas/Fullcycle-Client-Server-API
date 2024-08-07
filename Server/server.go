@@ -50,7 +50,7 @@ func createTable(db *sql.DB) error {
     )
     `)
 	if err != nil {
-		fmt.Println("Error creating table:", err)
+		log.Println("Error creating table:", err)
 		return err
 	}
 	return nil
@@ -74,7 +74,7 @@ func saveToDatabase(reqCtx context.Context, db *sql.DB, bid Bid) error {
 		bid.Usdbrl.Timestamp, bid.Usdbrl.CreateDate)
 	if err != nil {
 		_ = tx.Rollback()
-		fmt.Println("Error while inserting register:", err)
+		log.Println("Error while inserting register:", err)
 		return err
 
 	}
@@ -120,7 +120,7 @@ func bidHandler(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-ctx.Done():
-		log.Println("Requested canceled by user. Timeout.")
+		log.Println("Request canceled by user. Timeout.", ctx.Err())
 
 	default:
 		if err != nil {
@@ -149,27 +149,32 @@ func getBid(reqCtx context.Context) (string, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 
-	if resp != nil {
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return "", err
-		}
-		var bid Bid
-		err = json.Unmarshal(body, &bid)
-		if err != nil {
-			return "", err
-		}
+	select {
+	case <-ctx.Done():
+		log.Printf("Request canceled by user. Timeout\n %v", ctx.Err())
+		return "", errors.New("Request canceled by user. Timeout")
+	default:
+		if resp != nil {
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return "", err
+			}
+			var bid Bid
+			err = json.Unmarshal(body, &bid)
+			if err != nil {
+				return "", err
+			}
 
-		//save in the sqlite database
-		err = saveToDatabase(ctx, db, bid)
-		if err != nil {
-			return "", err
-		}
+			//save in the sqlite database
+			err = saveToDatabase(ctx, db, bid)
+			if err != nil {
+				return "", err
+			}
 
-		return bid.Usdbrl.Bid, nil
+			return bid.Usdbrl.Bid, nil
+		}
 	}
-
 	return "", errors.New("No response from Economia.awesomeapi.com.br")
 
 }

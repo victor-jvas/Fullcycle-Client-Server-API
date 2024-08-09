@@ -5,13 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
+	_ "modernc.org/sqlite"
 	"net/http"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 type Usdbrl struct {
@@ -32,8 +30,19 @@ type Bid struct {
 	Usdbrl Usdbrl `json:"USDBRL"`
 }
 
-func createTable(db *sql.DB) error {
-	_, err := db.Exec(`
+var db *sql.DB
+
+var apiURL = "https://economia.awesomeapi.com.br/json/last/USD-BRL"
+
+func initiDatabase() {
+	var err error
+	db, err = sql.Open("sqlite", "./data/my_database.db")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+
+	_, err = db.Exec(`
     CREATE TABLE IF NOT EXISTS bids (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         code TEXT,
@@ -50,131 +59,116 @@ func createTable(db *sql.DB) error {
     )
     `)
 	if err != nil {
-		log.Println("Error creating table:", err)
-		return err
+		log.Fatal("Erro ao criar tabela: ", err)
+		return
 	}
-	return nil
 }
 
-func saveToDatabase(reqCtx context.Context, db *sql.DB, bid Bid) error {
-
-	ctx, cancel := context.WithTimeout(reqCtx, 10*time.Millisecond)
+func saveToDatabase(reqctx context.Context, data Bid) {
+	ctx, cancel := context.WithTimeout(reqctx, 10*time.Millisecond)
 	defer cancel()
 
+	// Iniciar uma transação
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		log.Println("Erro ao iniciar transação:", err)
+		return
 	}
 
-	_, err = tx.ExecContext(ctx, `
-    INSERT INTO bids (code, codein, name, high, low, varBid, pctChange, bid, ask, timestamp, create_date)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		bid.Usdbrl.Code, bid.Usdbrl.Codein, bid.Usdbrl.Name, bid.Usdbrl.High, bid.Usdbrl.Low,
-		bid.Usdbrl.VarBid, bid.Usdbrl.PctChange, bid.Usdbrl.Bid, bid.Usdbrl.Ask,
-		bid.Usdbrl.Timestamp, bid.Usdbrl.CreateDate)
-	if err != nil {
-		_ = tx.Rollback()
-		log.Println("Error while inserting register:", err)
-		return err
+	usdbrl := data.Usdbrl
 
-	}
-	err = tx.Commit()
+	// Tentar inserir os dados na tabela
+	_, err = tx.ExecContext(
+		ctx,
+		`
+        INSERT INTO bids (code, codein, name, high, low, varBid, pctChange, bid, ask, timestamp, create_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		usdbrl.Code,
+		usdbrl.Codein,
+		usdbrl.Name,
+		usdbrl.High,
+		usdbrl.Low,
+		usdbrl.VarBid,
+		usdbrl.PctChange,
+		usdbrl.Bid,
+		usdbrl.Ask,
+		usdbrl.Timestamp,
+		usdbrl.CreateDate,
+	)
 	if err != nil {
-		fmt.Println("Error while commiting:", err)
-		return err
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			log.Println("Erro: operação de salvamento no banco de dados excedeu o tempo limite. ", ctx.Err())
+		} else {
+			log.Println("Erro ao salvar no banco de dados:", err)
+		}
+		return
 	}
-	return nil
+
+	// Confirmar a transação se não houver erros
+	if comErr := tx.Commit(); comErr != nil {
+		log.Println("Erro ao confirmar transação:", comErr)
+	} else {
+		log.Println("Dados salvos no banco de dados com sucesso.")
+	}
 }
-
-var db *sql.DB
 
 func main() {
-	var err error
-	db, err = sql.Open("sqlite", "./data/my_database.db")
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
-	defer db.Close()
 
-	err = createTable(db)
-	if err != nil {
-		panic(err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/cotacao", bidHandler)
-	err = http.ListenAndServe(":8080", mux)
+	initiDatabase()
+	http.HandleFunc("/cotacao", handler)
+	err := http.ListenAndServe("localhost:8080", nil)
 	if err != nil {
 		return
 	}
-
 }
 
-func bidHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	log.Println("Request initiated")
-	defer log.Println("Request completed")
-
-	bid, err := getBid(ctx)
-
-	select {
-	case <-ctx.Done():
-		log.Println("Request canceled by user. Timeout.", ctx.Err())
-
-	default:
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		err = json.NewEncoder(w).Encode(bid)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	}
-
-}
-
-func getBid(reqCtx context.Context) (string, error) {
-
-	ctx, cancel := context.WithTimeout(reqCtx, 200*time.Millisecond)
+func handler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
+	log.Println("Request iniciada")
+	defer log.Println("Request finalizada")
+
+	c := &http.Client{}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return "", err
+		log.Println(err)
+		http.Error(w, "Erro ao criar request: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	resp, err := http.DefaultClient.Do(req)
 
-	select {
-	case <-ctx.Done():
-		log.Printf("Request canceled by user. Timeout\n %v", ctx.Err())
-		return "", errors.New("Request canceled by user. Timeout")
-	default:
-		if resp != nil {
-			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return "", err
-			}
-			var bid Bid
-			err = json.Unmarshal(body, &bid)
-			if err != nil {
-				return "", err
-			}
-
-			//save in the sqlite database
-			err = saveToDatabase(ctx, db, bid)
-			if err != nil {
-				return "", err
-			}
-
-			return bid.Usdbrl.Bid, nil
-		}
+	resp, err := c.Do(req)
+	if err != nil {
+		log.Println(err)
+		http.Error(w, "Erro ao realizar request: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	return "", errors.New("No response from Economia.awesomeapi.com.br")
+	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "Erro da API externa: "+resp.Status, http.StatusInternalServerError)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Println(err)
+		http.Error(w, "Erro ao ler resposta: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var data Bid
+	if err := json.Unmarshal(body, &data); err != nil {
+		http.Error(w, "Erro ao parsear JSON: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	saveToDatabase(ctx, data)
+
+	_, err = w.Write([]byte(data.Usdbrl.Bid))
+	if err != nil {
+		log.Println(err)
+	}
 }
